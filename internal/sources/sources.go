@@ -68,6 +68,14 @@ type Source interface {
 	ToConfig() SourceConfig
 }
 
+// Getter reads sources that are already connected, reporting false for one that
+// is configured but has not been connected yet. Listing paths depend on that
+// distinction: a miss degrades to a tool's static manifest, where a stand-in
+// value would instead fail the type assertion every tool makes on its source.
+type Getter interface {
+	GetSource(string) (Source, bool)
+}
+
 // InitConnectionSpan adds a span for database pool connection initialization
 func InitConnectionSpan(ctx context.Context, tracer trace.Tracer, sourceType, sourceName string) (context.Context, trace.Span) {
 	ctx, span := tracer.Start(

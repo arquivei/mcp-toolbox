@@ -54,7 +54,6 @@ type Group struct {
 // that the Group package needs.
 // This is implemented to prevent import cycles.
 type GroupManager interface {
-	GetSource(string) (sources.Source, bool)
 	GetTool(string) (tools.Tool, bool)
 }
 
@@ -130,27 +129,30 @@ func (g Group) ContainsPrompt(name string) bool {
 }
 
 // ToolsetManifest builds a tools.ToolsetManifest for the group's tools, resolving
-// each declared tool name against toolsMap and generating its manifest from srcs.
-// The group holds tool names rather than tool pointers, so callers pass the
-// resolved tools and sources maps.
-func (g Group) ToolsetManifest(serverVersion string, mgr GroupManager) (tools.ToolsetManifest, error) {
+// each declared tool name against mgr and generating its manifest from srcs. The
+// group holds tool names rather than tool pointers, so callers pass the resolved
+// tools and sources.
+func (g Group) ToolsetManifest(serverVersion string, mgr GroupManager, srcs sources.Getter) (tools.ToolsetManifest, error) {
 	toolsManifest := make(map[string]tools.Manifest, len(g.ToolNames))
 	for _, name := range g.ToolNames {
 		tool, ok := mgr.GetTool(name)
 		if !ok {
 			return tools.ToolsetManifest{}, fmt.Errorf("tool does not exist: %s", name)
 		}
-		srcName := tool.GetSourceName()
 		var src sources.Source
-		if srcName != "" {
-			src, ok = mgr.GetSource(srcName)
-			if !ok {
-				return tools.ToolsetManifest{}, fmt.Errorf("unable to retrieve %s source for tool %q", srcName, name)
-			}
+		if srcName := tool.GetSourceName(); srcName != "" {
+			// A source that is configured but not yet connected is absent, so
+			// listing falls back to the static manifest rather than failing.
+			// Tools naming an unknown source are rejected at startup.
+			src, _ = srcs.GetSource(srcName)
 		}
-		m, err := tool.Manifest(src)
-		if err != nil {
-			return tools.ToolsetManifest{}, fmt.Errorf("error generating manifest for tool %q: %w", name, err)
+		m := tool.StaticManifest()
+		if src != nil {
+			resolved, err := tool.Manifest(src)
+			if err != nil {
+				return tools.ToolsetManifest{}, fmt.Errorf("error generating manifest for tool %q: %w", name, err)
+			}
+			m = resolved
 		}
 		toolsManifest[name] = m
 	}

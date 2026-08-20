@@ -29,6 +29,7 @@ import (
 	"github.com/googleapis/mcp-toolbox/internal/server/mcp/jsonrpc"
 	mcputil "github.com/googleapis/mcp-toolbox/internal/server/mcp/util"
 	"github.com/googleapis/mcp-toolbox/internal/server/primitives"
+	"github.com/googleapis/mcp-toolbox/internal/server/resolver"
 	"github.com/googleapis/mcp-toolbox/internal/sources"
 	"github.com/googleapis/mcp-toolbox/internal/tools"
 	"github.com/googleapis/mcp-toolbox/internal/util"
@@ -39,14 +40,14 @@ import (
 )
 
 // ProcessMethod returns a response for the request.
-func ProcessMethod(ctx context.Context, id jsonrpc.RequestId, method string, g group.Group, primitiveMgr *primitives.PrimitiveManager, body []byte, header http.Header) (any, error) {
+func ProcessMethod(ctx context.Context, id jsonrpc.RequestId, method string, g group.Group, primitiveMgr *primitives.PrimitiveManager, srcResolver *resolver.SourceResolver, body []byte, header http.Header) (any, error) {
 	switch method {
 	case SERVER_DISCOVER:
 		return serverDiscoverHandler(ctx, id, body, header)
 	case TOOLS_LIST:
-		return toolsListHandler(ctx, id, primitiveMgr, g, body, header)
+		return toolsListHandler(ctx, id, primitiveMgr, srcResolver, g, body, header)
 	case TOOLS_CALL:
-		return toolsCallHandler(ctx, id, g, primitiveMgr, body, header)
+		return toolsCallHandler(ctx, id, g, primitiveMgr, srcResolver, body, header)
 	case PROMPTS_LIST:
 		return promptsListHandler(ctx, id, primitiveMgr, g, body, header)
 	case PROMPTS_GET:
@@ -213,7 +214,7 @@ func serverDiscoverHandler(ctx context.Context, id jsonrpc.RequestId, body []byt
 	return res, nil
 }
 
-func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, primitiveMgr *primitives.PrimitiveManager, g group.Group, body []byte, header http.Header) (any, error) {
+func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, primitiveMgr *primitives.PrimitiveManager, srcResolver *resolver.SourceResolver, g group.Group, body []byte, header http.Header) (any, error) {
 	var req ListToolsRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		err = fmt.Errorf("invalid mcp tools list request: %w", err)
@@ -229,7 +230,7 @@ func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, primitiveMgr *p
 	}
 
 	urlParams, _ := util.UrlParamsFromContext(ctx)
-	listToolsResult, err := GenerateListToolsResult(primitiveMgr, g, urlParams)
+	listToolsResult, err := GenerateListToolsResult(primitiveMgr, srcResolver, g, urlParams)
 	if err != nil {
 		err = fmt.Errorf("error generating manifest: %w", err)
 		return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
@@ -247,7 +248,7 @@ func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, primitiveMgr *p
 }
 
 // toolsCallHandler generate a response for tools call.
-func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, g group.Group, primitiveMgr *primitives.PrimitiveManager, body []byte, header http.Header) (any, error) {
+func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, g group.Group, primitiveMgr *primitives.PrimitiveManager, srcResolver *resolver.SourceResolver, body []byte, header http.Header) (any, error) {
 	authServices := primitiveMgr.AuthServices()
 
 	// retrieve logger from context
@@ -298,13 +299,33 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, g group.Group, 
 		return jsonrpc.NewError(id, jsonrpc.INVALID_PARAMS, err.Error(), nil), err
 	}
 
-	srcName := tool.GetSourceName()
 	var src sources.Source
-	if srcName != "" {
-		src, ok = primitiveMgr.GetSource(srcName)
-		if !ok {
-			err = fmt.Errorf("unable to retrieve source for tool %s", toolName)
-			return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
+	if srcName := tool.GetSourceName(); srcName != "" {
+		// Connects the source if lazy initialization deferred it. A failure is
+		// reported as a tool execution error rather than a protocol error, so
+		// the agent sees why the source is unreachable.
+		resolveStart := time.Now()
+		src, err = srcResolver.Resolve(ctx, srcName)
+		if err != nil {
+			mcputil.RecordToolExecutionFailure(ctx, toolName, time.Since(resolveStart).Seconds(), err)
+			text := TextContent{
+				Type: "text",
+				Text: fmt.Sprintf("unable to retrieve source for tool %s: %s", toolName, err),
+			}
+			return jsonrpc.JSONRPCResponse{
+				Jsonrpc: jsonrpc.JSONRPC_VERSION,
+				Id:      id,
+				Result: CallToolResult{
+					Result: Result{
+						ResultType: resultTypeComplete,
+						Result: jsonrpc.Result{
+							Meta: meta,
+						},
+					},
+					Content: []TextContent{text},
+					IsError: true,
+				},
+			}, nil
 		}
 	}
 
@@ -786,7 +807,7 @@ func groupsListHandler(ctx context.Context, id jsonrpc.RequestId, primitiveMgr *
 
 // groupsGetHandler handles the "groups/get" method. It returns the named group's
 // tools and prompts.
-func groupsGetHandler(ctx context.Context, id jsonrpc.RequestId, primitiveMgr *primitives.PrimitiveManager, body []byte, header http.Header) (any, error) {
+func groupsGetHandler(ctx context.Context, id jsonrpc.RequestId, primitiveMgr *primitives.PrimitiveManager, srcResolver *resolver.SourceResolver, body []byte, header http.Header) (any, error) {
 	// retrieve logger from context
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
@@ -829,7 +850,7 @@ func groupsGetHandler(ctx context.Context, id jsonrpc.RequestId, primitiveMgr *p
 	}
 
 	urlParams, _ := util.UrlParamsFromContext(ctx)
-	result, err := GenerateGetGroupResult(primitiveMgr, g, urlParams)
+	result, err := GenerateGetGroupResult(primitiveMgr, srcResolver, g, urlParams)
 	if err != nil {
 		return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
 	}

@@ -39,6 +39,7 @@ description: >
 |              | `--user-agent-metadata`    | Appends additional metadata to the User-Agent.                                                                                                                            |             |
 |              | `--poll-interval`          | Specifies the polling frequency (seconds) for configuration file updates.                                                                                                 | `0`         |
 |              | `--enable-draft-specs`     | Opt-in and test upcoming draft MCP specifications.                                                                                                                        | `false`     |
+|              | `--lazy-source-init`       | Connect to each source on first use instead of at startup.                                                                                                                | `false`     |
 | `-v`         | `--version`                | version for toolbox                                                                                                                                                       |             |
 
 ## Sub Commands
@@ -237,6 +238,50 @@ reloading, use the `--disable-reload` flag.
   which is a great fallback for network drives or container volumes where OS
   events might get dropped. Set the interval to `0` to disable the polling
   system.
+
+### Lazy Source Initialization
+
+By default Toolbox connects to every configured source at startup, and fails to
+start if any connection fails. Pass `--lazy-source-init` to defer each
+connection until the first tool call that needs it.
+
+This is useful when you want to inspect a tool catalog without provisioning
+databases, when cold start time matters, or when you would rather a broken
+source surface as a tool error the agent can read than as a server that never
+comes up.
+
+```bash
+./toolbox --prebuilt alloydb-postgres --lazy-source-init
+```
+
+The flag is sufficient on its own — the command above starts and serves the full
+AlloyDB tool catalog with no database, no credentials, and none of the
+`ALLOYDB_POSTGRES_*` environment variables set.
+
+With the flag set:
+
+* Toolbox starts even when no source is reachable, and `tools/list` and
+  `/api/toolset` return the full catalog.
+* The first call to a tool connects its source. If that fails, the call returns
+  a tool error containing the connection failure and the server stays up. The
+  connection is retried on the next call, so a source that comes up later starts
+  working without a restart.
+* A tool naming a source that does not exist in the config is still rejected at
+  startup.
+
+Two checks move from startup to first call. Source and tool type compatibility
+(for example a `postgres-sql` tool pointed at a `bigquery` source) is verified
+when the tool is invoked rather than when the server boots. Tools whose input
+schema is derived from a live source — such as the BigQuery tools that read
+allowed datasets and write mode — advertise their static schema until that
+source connects, and their resolved schema afterward.
+
+Unset `${VAR}` placeholders no longer fail startup. Because nothing connects
+until a tool call, an unset required variable resolves to its own name as a
+placeholder so the config still parses and validates. Toolbox logs a warning
+naming every variable it substituted, and any source relying on one fails when
+that source is first reached. Without `--lazy-source-init` a missing variable is
+still a startup error.
 
 ### Toolbox UI
 
