@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.10.0](https://github.com/googleapis/mcp-toolbox/compare/v1.9.0...v1.10.0) (2026-08-27)
+
+
+### Features
+
+* **firestore-mongodb:** Add firestore-execute-mql and firestore-get-… ([#3826](https://github.com/googleapis/mcp-toolbox/issues/3826)) ([4a85d75](https://github.com/googleapis/mcp-toolbox/commit/4a85d75a97f60eb601a42ceb29000e7d5d0ad8ae))
+* **server/mcp:** Support com.google.cloud/toolbox.v1 extension in v20260728 ([#3801](https://github.com/googleapis/mcp-toolbox/issues/3801)) ([f4f7da6](https://github.com/googleapis/mcp-toolbox/commit/f4f7da605245ff9e8d491d0c55591ba3b400623b))
+* **skill:** Add fix-failing-tests skill for mcp-toolbox ([#3821](https://github.com/googleapis/mcp-toolbox/issues/3821)) ([168e69c](https://github.com/googleapis/mcp-toolbox/commit/168e69c048d65aa15b926f9dd7680245949cc57a))
+* **tool/mongodb:** Allow collection to be specified at runtime ([#3715](https://github.com/googleapis/mcp-toolbox/issues/3715)) ([7626eaf](https://github.com/googleapis/mcp-toolbox/commit/7626eaf51e0c0a901110670e5bfb721942043480))
+
+
+### Bug Fixes
+
+* **cloud-storage:** Resolve symlinks when enforcing local path boundaries ([#3810](https://github.com/googleapis/mcp-toolbox/issues/3810)) ([c2ada64](https://github.com/googleapis/mcp-toolbox/commit/c2ada6421f718cb861c7ccd5f0e8cd7e841a407f))
+* **config:** Compare env var offsets in rune space when skipping comments ([#3856](https://github.com/googleapis/mcp-toolbox/issues/3856)) ([2e76934](https://github.com/googleapis/mcp-toolbox/commit/2e769343332cf84084a162e23f556490faa20d32))
+* Merge prebuilt tools when reloading custom config ([#3864](https://github.com/googleapis/mcp-toolbox/issues/3864)) ([5a6d865](https://github.com/googleapis/mcp-toolbox/commit/5a6d865eff939ace8c803d3ce8831aa83d00a750))
+* Normalize postgres UUIDs to strings ([#3806](https://github.com/googleapis/mcp-toolbox/issues/3806)) ([3b02f1d](https://github.com/googleapis/mcp-toolbox/commit/3b02f1d86ab774c1e0fb13d0de7b6b428da78b83))
+* **test/alloydbainl:** Use explicit SQL alias prompts to stabilize AI… ([#3877](https://github.com/googleapis/mcp-toolbox/issues/3877)) ([50e45ed](https://github.com/googleapis/mcp-toolbox/commit/50e45ed41daad46908ff20770f6f21d61f452846))
+* **tests:** Prevent resource leaks by using context.WithoutCancel ([#3849](https://github.com/googleapis/mcp-toolbox/issues/3849)) ([f97a4f9](https://github.com/googleapis/mcp-toolbox/commit/f97a4f9a25a90e1894a7be26676d2ed365c6ef3a))
+
 ## [1.9.0](https://github.com/googleapis/mcp-toolbox/compare/v1.8.0...v1.9.0) (2026-08-14)
 
 
