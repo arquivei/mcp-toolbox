@@ -57,6 +57,8 @@ type compatibleSource interface {
 	GetMaximumBytesBilled() int64
 	IsDatasetAllowed(projectID, datasetID string) bool
 	BigQueryAllowedDatasets() []string
+	IsTableAllowed(projectID, datasetID, tableID string) bool
+	BigQueryAllowedTables() []string
 	RetrieveClientAndService(tools.AccessToken) (*bigqueryapi.Client, *bigqueryrestapi.Service, error)
 	RunSQL(context.Context, *bigqueryapi.Client, string, string, []bigqueryapi.QueryParameter, []*bigqueryapi.ConnectionProperty, map[string]string) (any, error)
 }
@@ -80,7 +82,7 @@ func (cfg Config) Initialize(context.Context) (tools.Tool, error) {
 		return nil, fmt.Errorf("description is required for tool %q", cfg.Name)
 	}
 
-	params, err := buildParams("", nil)
+	params, err := buildParams("", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +172,7 @@ func (t Tool) Invoke(ctx context.Context, s sources.Source, params parameters.Pa
 		}
 	}
 
-	if len(source.BigQueryAllowedDatasets()) > 0 {
+	if len(source.BigQueryAllowedDatasets()) > 0 || len(source.BigQueryAllowedTables()) > 0 {
 		switch statementType {
 		case "CREATE_SCHEMA", "DROP_SCHEMA", "ALTER_SCHEMA":
 			return nil, util.NewAgentError(fmt.Sprintf("dataset-level operations like '%s' are not allowed when dataset restrictions are in place", statementType), nil)
@@ -209,9 +211,11 @@ func (t Tool) Invoke(ctx context.Context, s sources.Source, params parameters.Pa
 		for tableID := range tableIDSet {
 			parts := strings.Split(tableID, ".")
 			if len(parts) == 3 {
-				projectID, datasetID := parts[0], parts[1]
-				if !source.IsDatasetAllowed(projectID, datasetID) {
-					return nil, util.NewAgentError(fmt.Sprintf("query accesses dataset '%s.%s', which is not in the allowed list", projectID, datasetID), nil)
+				projectID, datasetID, table := parts[0], parts[1], parts[2]
+				if !source.IsTableAllowed(projectID, datasetID, table) {
+					return nil, util.NewAgentError(fmt.Sprintf(
+						"query accesses table '%s.%s.%s', which is not in the allowed list",
+						projectID, datasetID, table), nil)
 				}
 			}
 		}
@@ -258,9 +262,9 @@ func (t Tool) GetAuthTokenHeaderName(source sources.Source) (string, error) {
 	return s.GetAuthTokenHeaderName(), nil
 }
 
-// buildParams builds the tool's parameters from the source's write mode and allowed-dataset
-// configuration. Empty writeMode and a nil allow-list yield the plain skeleton.
-func buildParams(writeMode string, allowedDatasets []string) (parameters.Parameters, error) {
+// buildParams builds the tool's parameters from the source's write mode and allowed-dataset/
+// allowed-table configuration. Empty writeMode and nil allow-lists yield the plain skeleton.
+func buildParams(writeMode string, allowedDatasets, allowedTables []string) (parameters.Parameters, error) {
 	var sqlDescriptionBuilder strings.Builder
 	switch writeMode {
 	case bigqueryds.WriteModeBlocked:
@@ -291,6 +295,17 @@ func buildParams(writeMode string, allowedDatasets []string) (parameters.Paramet
 		}
 	}
 
+	if len(allowedTables) > 0 {
+		tableIDs := make([]string, 0, len(allowedTables))
+		for _, t := range allowedTables {
+			tableIDs = append(tableIDs, fmt.Sprintf("`%s`", t))
+		}
+		fmt.Fprintf(&sqlDescriptionBuilder,
+			" The query may also access these specific tables or views: %s. "+
+				"Wildcard table references (e.g. `dataset.prefix_*`) are not accepted for these.",
+			strings.Join(tableIDs, ", "))
+	}
+
 	sqlParameter := parameters.NewStringParameter("sql", sqlDescriptionBuilder.String())
 	dryRunParameter := parameters.NewBooleanParameter(
 		"dry_run",
@@ -306,7 +321,7 @@ func (t Tool) resolveParams(source sources.Source) (parameters.Parameters, error
 	if !ok {
 		return nil, fmt.Errorf("invalid source for %q tool: source %q is not a compatible type", t.Cfg.Type, t.Cfg.Source)
 	}
-	return buildParams(s.BigQueryWriteMode(), s.BigQueryAllowedDatasets())
+	return buildParams(s.BigQueryWriteMode(), s.BigQueryAllowedDatasets(), s.BigQueryAllowedTables())
 }
 
 // GetParameters returns the tool's parameters, resolved against the source.

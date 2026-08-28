@@ -2791,10 +2791,8 @@ func runExecuteSqlWithRestriction(t *testing.T, allowedTableFullName, disallowed
 			name:           "invoke on disallowed table",
 			sql:            fmt.Sprintf("SELECT * FROM %s", disallowedTableFullName),
 			wantStatusCode: http.StatusOK,
-			wantInError: fmt.Sprintf("query accesses dataset '%s', which is not in the allowed list",
-				strings.Join(
-					strings.Split(strings.Trim(disallowedTableFullName, "`"), ".")[0:2],
-					".")),
+			wantInError: fmt.Sprintf("query accesses table '%s', which is not in the allowed list",
+				strings.Trim(disallowedTableFullName, "`")),
 		},
 		{
 			name:           "disallowed create schema",
@@ -2937,7 +2935,6 @@ func runConversationalAnalyticsWithRestriction(t *testing.T, allowedDatasetName,
 func runForecastWithRestriction(t *testing.T, allowedTableFullName, disallowedTableFullName string) {
 	allowedTableUnquoted := strings.ReplaceAll(allowedTableFullName, "`", "")
 	disallowedTableUnquoted := strings.ReplaceAll(disallowedTableFullName, "`", "")
-	disallowedDatasetFQN := strings.Join(strings.Split(disallowedTableUnquoted, ".")[0:2], ".")
 
 	testCases := []struct {
 		name           string
@@ -2958,7 +2955,7 @@ func runForecastWithRestriction(t *testing.T, allowedTableFullName, disallowedTa
 			name:           "invoke with disallowed table name",
 			historyData:    disallowedTableUnquoted,
 			wantStatusCode: http.StatusOK,
-			wantInError:    fmt.Sprintf("access to dataset '%s' (from table '%s') is not allowed", disallowedDatasetFQN, disallowedTableUnquoted),
+			wantInError:    fmt.Sprintf("access to table '%s' (from '%s') is not allowed", disallowedTableUnquoted, disallowedTableUnquoted),
 		},
 		{
 			name:           "invoke with query on allowed table",
@@ -2970,7 +2967,7 @@ func runForecastWithRestriction(t *testing.T, allowedTableFullName, disallowedTa
 			name:           "invoke with query on disallowed table",
 			historyData:    fmt.Sprintf("SELECT * FROM %s", disallowedTableFullName),
 			wantStatusCode: http.StatusOK,
-			wantInError:    fmt.Sprintf("query accesses dataset '%s', which is not in the allowed list", disallowedDatasetFQN),
+			wantInError:    fmt.Sprintf("query accesses table '%s', which is not in the allowed list", disallowedTableUnquoted),
 		},
 		{
 			name:           "invoke with SQL injection in timestamp_col",
@@ -3068,7 +3065,6 @@ func runForecastWithRestriction(t *testing.T, allowedTableFullName, disallowedTa
 func runAnalyzeContributionWithRestriction(t *testing.T, allowedTableFullName, disallowedTableFullName string) {
 	allowedTableUnquoted := strings.ReplaceAll(allowedTableFullName, "`", "")
 	disallowedTableUnquoted := strings.ReplaceAll(disallowedTableFullName, "`", "")
-	disallowedDatasetFQN := strings.Join(strings.Split(disallowedTableUnquoted, ".")[0:2], ".")
 
 	testCases := []struct {
 		name               string
@@ -3090,7 +3086,7 @@ func runAnalyzeContributionWithRestriction(t *testing.T, allowedTableFullName, d
 			name:           "invoke with disallowed table name",
 			inputData:      disallowedTableUnquoted,
 			wantStatusCode: http.StatusOK,
-			wantInError:    fmt.Sprintf("access to dataset '%s' (from table '%s') is not allowed", disallowedDatasetFQN, disallowedTableUnquoted),
+			wantInError:    fmt.Sprintf("access to table '%s' (from '%s') is not allowed", disallowedTableUnquoted, disallowedTableUnquoted),
 		},
 		{
 			name:           "invoke with query on allowed table",
@@ -3102,7 +3098,7 @@ func runAnalyzeContributionWithRestriction(t *testing.T, allowedTableFullName, d
 			name:           "invoke with query on disallowed table",
 			inputData:      fmt.Sprintf("SELECT * FROM %s", disallowedTableFullName),
 			wantStatusCode: http.StatusOK,
-			wantInError:    fmt.Sprintf("query accesses dataset '%s', which is not in the allowed list", disallowedDatasetFQN),
+			wantInError:    fmt.Sprintf("query accesses table '%s', which is not in the allowed list", disallowedTableUnquoted),
 		},
 		{
 			name:           "invoke with SQL injection in is_test_col",

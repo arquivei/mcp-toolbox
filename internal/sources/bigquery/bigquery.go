@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"net/http"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +88,7 @@ type Config struct {
 	Location                  string              `yaml:"location"`
 	WriteMode                 string              `yaml:"writeMode"`
 	AllowedDatasets           StringOrStringSlice `yaml:"allowedDatasets"`
+	AllowedTables             StringOrStringSlice `yaml:"allowedTables"`
 	UseClientOAuth            string              `yaml:"useClientOAuth"`
 	QuotaProject              string              `yaml:"quotaProject"`
 	ImpersonateServiceAccount string              `yaml:"impersonateServiceAccount"`
@@ -225,6 +227,45 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 	}
 
 	s.AllowedDatasets = allowedDatasets
+
+	// Table-level allowlist. Complements allowedDatasets with OR semantics: a
+	// table is allowed if its whole dataset is allowed OR if it is listed
+	// here.
+	//
+	// Always requires all 3 parts. Two parts is rejected because it would
+	// already mean 'project.dataset' in allowedDatasets' format — that would
+	// be ambiguous.
+	//
+	// No existence check is performed: with useClientOAuth, s.Client is nil
+	// and there is no credential at boot time to query BigQuery with. A typo
+	// here fails closed (the table simply never matches), and the safety net
+	// is the acceptance test that checks the tools' description.
+	//
+	// A table whose dataset is already in allowedDatasets is rejected as a
+	// config error rather than silently accepted: allowedDatasets takes
+	// unconditional precedence, so the entry would be dead configuration
+	// that looks like it narrows access but does nothing — the exact
+	// mistake this check exists to catch at boot instead of in production.
+	allowedTables := make(map[string]struct{})
+	for _, allowed := range r.AllowedTables {
+		if strings.Contains(allowed, "*") {
+			return nil, fmt.Errorf("invalid allowedTable %q: wildcard tables are not supported; "+
+				"allow the whole dataset via allowedDatasets instead", allowed)
+		}
+		parts := strings.Split(allowed, ".")
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("invalid allowedTable format: %q, expected 'project.dataset.table'", allowed)
+		}
+		datasetFullID := fmt.Sprintf("%s.%s", parts[0], parts[1])
+		if _, ok := allowedDatasets[datasetFullID]; ok {
+			return nil, fmt.Errorf("invalid allowedTable %q: dataset %q is already in allowedDatasets, "+
+				"which takes precedence and makes this entry redundant; remove it from allowedTables or "+
+				"from allowedDatasets", allowed, datasetFullID)
+		}
+		allowedTables[allowed] = struct{}{}
+	}
+	s.AllowedTables = allowedTables
+
 	s.SessionProvider = s.newBigQuerySessionProvider()
 
 	if r.WriteMode != WriteModeAllowed && r.WriteMode != WriteModeBlocked && r.WriteMode != WriteModeProtected {
@@ -298,6 +339,7 @@ type Source struct {
 	MaximumBytesBilled        int64
 	ClientCreator             BigqueryClientCreator
 	AllowedDatasets           map[string]struct{}
+	AllowedTables             map[string]struct{}
 	sessionMutex              sync.Mutex
 	makeDataplexCatalogClient func() (*dataplexapi.CatalogClient, DataplexClientCreator, error)
 	SessionProvider           BigQuerySessionProvider
@@ -510,6 +552,70 @@ func (s *Source) IsDatasetAllowed(projectID, datasetID string) bool {
 	targetDataset := fmt.Sprintf("%s.%s", projectID, datasetID)
 	_, ok := s.AllowedDatasets[targetDataset]
 	return ok
+}
+
+// BigQueryAllowedTables returns the configured table-level allowlist, sorted.
+//
+// The order is stable on purpose: this list feeds tool parameter descriptions,
+// which are part of the MCP tools/list payload. An unstable description would
+// change between restarts and break assertions that inspect it.
+func (s *Source) BigQueryAllowedTables() []string {
+	if len(s.AllowedTables) == 0 {
+		return nil
+	}
+	tables := make([]string, 0, len(s.AllowedTables))
+	for t := range s.AllowedTables {
+		tables = append(tables, t)
+	}
+	sort.Strings(tables)
+	return tables
+}
+
+// IsTableAllowed reports whether a specific table may be accessed.
+//
+// A table is allowed when its dataset is allowed outright, or when the table
+// itself is in the table-level allowlist. Wildcard references are only accepted
+// through allowedDatasets: the set of tables a pattern matches changes as new
+// tables are created, so honouring a pattern against a table-level entry would
+// let the allowlist widen without review.
+func (s *Source) IsTableAllowed(projectID, datasetID, tableID string) bool {
+	if len(s.AllowedDatasets) == 0 && len(s.AllowedTables) == 0 {
+		return true
+	}
+	// IsDatasetAllowed returns true when AllowedDatasets is empty (meaning "no
+	// restriction" for that check alone), which would incorrectly allow every
+	// dataset for a tables-only configuration. Only delegate to it when
+	// AllowedDatasets actually has entries.
+	if len(s.AllowedDatasets) > 0 && s.IsDatasetAllowed(projectID, datasetID) {
+		return true
+	}
+	if strings.Contains(tableID, "*") {
+		return false
+	}
+	_, ok := s.AllowedTables[fmt.Sprintf("%s.%s.%s", projectID, datasetID, tableID)]
+	return ok
+}
+
+// IsDatasetVisible reports whether a dataset may be introspected at all: either
+// it is allowed outright, or it holds at least one allowed table. Used by the
+// metadata tools, which return dataset/table structure but no row data.
+func (s *Source) IsDatasetVisible(projectID, datasetID string) bool {
+	if len(s.AllowedDatasets) == 0 && len(s.AllowedTables) == 0 {
+		return true
+	}
+	// See the comment in IsTableAllowed: IsDatasetAllowed returns true on an
+	// empty AllowedDatasets, so it must only be consulted when that map is
+	// actually populated.
+	if len(s.AllowedDatasets) > 0 && s.IsDatasetAllowed(projectID, datasetID) {
+		return true
+	}
+	prefix := fmt.Sprintf("%s.%s.", projectID, datasetID)
+	for t := range s.AllowedTables {
+		if strings.HasPrefix(t, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Source) MakeDataplexCatalogClient() func() (*dataplexapi.CatalogClient, DataplexClientCreator, error) {

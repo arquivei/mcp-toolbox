@@ -102,20 +102,33 @@ func BQTypeStringFromToolType(toolType string) (string, error) {
 	}
 }
 
-// InitializeDatasetParameters generates project and dataset tool parameters based on allowedDatasets.
+// InitializeDatasetParameters generates project and dataset tool parameters
+// based on allowedDatasets and allowedTables. allowedTables surfaces
+// individually-allowed tables (in `project.dataset.table` form) in the
+// dataset parameter's description, so an agent that only has table-level
+// access can still discover which dataset value to pass to
+// get_table_info/get_dataset_info/list_table_ids.
 func InitializeDatasetParameters(
 	allowedDatasets []string,
+	allowedTables []string,
 	defaultProjectID string,
 	projectKey, datasetKey string,
 	projectDescription, datasetDescription string,
 ) (projectParam, datasetParam parameters.Parameter) {
+	// singleDatasetDefault holds the default value that the single-dataset
+	// branch below attaches to datasetParam via WithStringDefault. If the
+	// allowedTables block later rebuilds datasetParam, it must reapply this
+	// default explicitly, or the default silently disappears.
+	var singleDatasetDefault string
+	var hasSingleDatasetDefault bool
+
 	if len(allowedDatasets) > 0 {
 		if len(allowedDatasets) == 1 {
 			parts := strings.Split(allowedDatasets[0], ".")
-			defaultProjectID = parts[0]
 			datasetID := parts[1]
-			projectDescription += fmt.Sprintf(" Must be `%s`.", defaultProjectID)
 			datasetDescription += fmt.Sprintf(" Must be `%s`.", datasetID)
+			singleDatasetDefault = datasetID
+			hasSingleDatasetDefault = true
 			datasetParam = parameters.NewStringParameter(datasetKey, datasetDescription, parameters.WithStringDefault(datasetID))
 		} else {
 			datasetIDsByProject := make(map[string][]string)
@@ -126,21 +139,93 @@ func InitializeDatasetParameters(
 				datasetIDsByProject[project] = append(datasetIDsByProject[project], fmt.Sprintf("`%s`", dataset))
 			}
 
-			var datasetDescriptions, projectIDList []string
+			var datasetDescriptions []string
 			for project, datasets := range datasetIDsByProject {
 				sort.Strings(datasets)
-				projectIDList = append(projectIDList, fmt.Sprintf("`%s`", project))
 				datasetList := strings.Join(datasets, ", ")
 				datasetDescriptions = append(datasetDescriptions, fmt.Sprintf("%s from project `%s`", datasetList, project))
 			}
-			sort.Strings(projectIDList)
 			sort.Strings(datasetDescriptions)
-			projectDescription += fmt.Sprintf(" Must be one of the following: %s.", strings.Join(projectIDList, ", "))
 			datasetDescription += fmt.Sprintf(" Must be one of the allowed datasets: %s.", strings.Join(datasetDescriptions, "; "))
 			datasetParam = parameters.NewStringParameter(datasetKey, datasetDescription)
 		}
 	} else {
 		datasetParam = parameters.NewStringParameter(datasetKey, datasetDescription)
+	}
+
+	if len(allowedTables) > 0 {
+		tablesByDataset := make(map[string][]string)
+		for _, t := range allowedTables {
+			parts := strings.Split(t, ".")
+			if len(parts) != 3 {
+				continue
+			}
+			ds := fmt.Sprintf("%s.%s", parts[0], parts[1])
+			tablesByDataset[ds] = append(tablesByDataset[ds], fmt.Sprintf("`%s`", parts[2]))
+		}
+		datasetKeys := make([]string, 0, len(tablesByDataset))
+		for ds := range tablesByDataset {
+			datasetKeys = append(datasetKeys, ds)
+		}
+		sort.Strings(datasetKeys)
+
+		var fragments []string
+		for _, ds := range datasetKeys {
+			sort.Strings(tablesByDataset[ds])
+			fragments = append(fragments, fmt.Sprintf("%s from dataset `%s`",
+				strings.Join(tablesByDataset[ds], ", "), ds))
+		}
+		datasetDescription += fmt.Sprintf(
+			" These datasets are also reachable, but only for these specific tables or views: %s.",
+			strings.Join(fragments, "; "))
+
+		if hasSingleDatasetDefault {
+			datasetParam = parameters.NewStringParameter(datasetKey, datasetDescription, parameters.WithStringDefault(singleDatasetDefault))
+		} else {
+			datasetParam = parameters.NewStringParameter(datasetKey, datasetDescription)
+		}
+	}
+
+	// The project parameter's description/default must reflect the union of
+	// every project referenced by allowedDatasets and allowedTables, not just
+	// allowedDatasets. A single allowedDatasets entry does NOT mean a single
+	// project is allowed when allowedTables references a different project;
+	// claiming otherwise would make that table effectively unreachable via
+	// the tool's own documented interface.
+	projectSet := make(map[string]struct{})
+	for _, ds := range allowedDatasets {
+		parts := strings.Split(ds, ".")
+		if len(parts) >= 1 && parts[0] != "" {
+			projectSet[parts[0]] = struct{}{}
+		}
+	}
+	for _, t := range allowedTables {
+		parts := strings.Split(t, ".")
+		if len(parts) == 3 {
+			projectSet[parts[0]] = struct{}{}
+		}
+	}
+
+	switch len(projectSet) {
+	case 0:
+		// No dataset/table allowlist to derive a project from; leave
+		// projectDescription/defaultProjectID untouched.
+	case 1:
+		var project string
+		for p := range projectSet {
+			project = p
+		}
+		defaultProjectID = project
+		projectDescription += fmt.Sprintf(" Must be `%s`.", project)
+	default:
+		projects := make([]string, 0, len(projectSet))
+		for p := range projectSet {
+			projects = append(projects, fmt.Sprintf("`%s`", p))
+		}
+		sort.Strings(projects)
+		projectDescription += fmt.Sprintf(" Must be one of the following: %s.", strings.Join(projects, ", "))
+		// Multiple projects are allowed; do not lock the default to a single
+		// one of them, preserve whatever default the caller passed in.
 	}
 
 	projectParam = parameters.NewStringParameter(projectKey, projectDescription, parameters.WithStringDefault(defaultProjectID))

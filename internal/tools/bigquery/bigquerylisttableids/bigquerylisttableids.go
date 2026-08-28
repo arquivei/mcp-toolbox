@@ -54,6 +54,9 @@ type compatibleSource interface {
 	GetAuthTokenHeaderName() string
 	IsDatasetAllowed(projectID, datasetID string) bool
 	BigQueryAllowedDatasets() []string
+	IsDatasetVisible(projectID, datasetID string) bool
+	IsTableAllowed(projectID, datasetID, tableID string) bool
+	BigQueryAllowedTables() []string
 	RetrieveClientAndService(tools.AccessToken) (*bigqueryapi.Client, *bigqueryrestapi.Service, error)
 }
 
@@ -76,7 +79,7 @@ func (cfg Config) Initialize(context.Context) (tools.Tool, error) {
 		return nil, fmt.Errorf("description is required for tool %q", cfg.Name)
 	}
 
-	params := buildParams(nil, "")
+	params := buildParams(nil, nil, "")
 	return Tool{
 		BaseTool: tools.NewBaseTool(
 			cfg,
@@ -126,8 +129,8 @@ func (t Tool) Invoke(ctx context.Context, s sources.Source, params parameters.Pa
 		return nil, util.NewAgentError(fmt.Sprintf("invalid or missing '%s' parameter; expected a string", datasetKey), nil)
 	}
 
-	if !source.IsDatasetAllowed(projectId, datasetId) {
-		return nil, util.NewAgentError(fmt.Sprintf("access denied to dataset '%s' because it is not in the configured list of allowed datasets for project '%s'", datasetId, projectId), nil)
+	if !source.IsDatasetVisible(projectId, datasetId) {
+		return nil, util.NewAgentError(fmt.Sprintf("access denied to dataset '%s' because it is not in the configured allowlist for project '%s'", datasetId, projectId), nil)
 	}
 
 	bqClient, _, err := source.RetrieveClientAndService(accessToken)
@@ -153,6 +156,15 @@ func (t Tool) Invoke(ctx context.Context, s sources.Source, params parameters.Pa
 		if len(id) >= 2 && id[0] == '"' && id[len(id)-1] == '"' {
 			id = id[1 : len(id)-1]
 		}
+
+		// Do not advertise a table that execute_sql would refuse. Without this
+		// filter, a dataset reachable only via a table entry would return the
+		// entire listing: in arquiveiprod.arquivei_streaming_parsed_events that
+		// is 905 names for 2 useful tables.
+		if !source.IsTableAllowed(projectId, datasetId, id) {
+			continue
+		}
+
 		tableIds = append(tableIds, id)
 	}
 
@@ -177,10 +189,10 @@ func (t Tool) GetAuthTokenHeaderName(source sources.Source) (string, error) {
 
 // buildParams builds the tool's parameters from the source's allowed-dataset configuration.
 // A nil allow-list and empty default project yield the plain skeleton.
-func buildParams(allowedDatasets []string, defaultProject string) parameters.Parameters {
+func buildParams(allowedDatasets []string, allowedTables []string, defaultProject string) parameters.Parameters {
 	projectDescription := "The Google Cloud project ID containing the dataset."
 	datasetDescription := "The dataset to list table ids."
-	projectParameter, datasetParameter := bqutil.InitializeDatasetParameters(allowedDatasets, defaultProject, projectKey, datasetKey, projectDescription, datasetDescription)
+	projectParameter, datasetParameter := bqutil.InitializeDatasetParameters(allowedDatasets, allowedTables, defaultProject, projectKey, datasetKey, projectDescription, datasetDescription)
 	return parameters.Parameters{projectParameter, datasetParameter}
 }
 
@@ -190,7 +202,7 @@ func (t Tool) resolveParams(source sources.Source) (parameters.Parameters, error
 	if !ok {
 		return nil, fmt.Errorf("invalid source for %q tool: source %q is not a compatible type", t.Cfg.Type, t.Cfg.Source)
 	}
-	return buildParams(s.BigQueryAllowedDatasets(), s.BigQueryProject()), nil
+	return buildParams(s.BigQueryAllowedDatasets(), s.BigQueryAllowedTables(), s.BigQueryProject()), nil
 }
 
 // GetParameters returns the tool's parameters, resolved against the source.

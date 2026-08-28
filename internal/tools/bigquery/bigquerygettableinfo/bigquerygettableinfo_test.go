@@ -15,13 +15,20 @@
 package bigquerygettableinfo_test
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	bigqueryapi "cloud.google.com/go/bigquery"
 	"github.com/google/go-cmp/cmp"
 	"github.com/googleapis/mcp-toolbox/internal/server"
 	"github.com/googleapis/mcp-toolbox/internal/testutils"
 	"github.com/googleapis/mcp-toolbox/internal/tools"
+	"github.com/googleapis/mcp-toolbox/internal/tools/bigquery/bigquerycommon"
 	"github.com/googleapis/mcp-toolbox/internal/tools/bigquery/bigquerygettableinfo"
+	"github.com/googleapis/mcp-toolbox/internal/util/parameters"
+	"google.golang.org/api/option"
 )
 
 func TestParseFromYamlBigQueryGetTableInfo(t *testing.T) {
@@ -69,4 +76,79 @@ func TestParseFromYamlBigQueryGetTableInfo(t *testing.T) {
 		})
 	}
 
+}
+
+// TestInvokeAllowedTables verifies that get_table_info uses IsTableAllowed
+// (row/data-access gating) rather than the broader IsDatasetVisible: a table
+// not itself in AllowedTables must be rejected even if its sibling table in
+// the same dataset is allowed.
+func TestInvokeAllowedTables(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"kind": "bigquery#table",
+			"id": "p:d.allowed",
+			"tableReference": {"projectId": "p", "datasetId": "d", "tableId": "allowed"}
+		}`))
+	}))
+	defer mockServer.Close()
+
+	ctx, err := testutils.ContextWithNewLogger()
+	if err != nil {
+		t.Fatalf("failed to create context with logger: %v", err)
+	}
+
+	bqClient, err := bigqueryapi.NewClient(ctx, "p", option.WithEndpoint(mockServer.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create mocked BigQuery client: %v", err)
+	}
+
+	source := &bigquerycommon.MockSource{
+		Client:        bqClient,
+		AllowedTables: []string{"p.d.allowed"},
+	}
+
+	cfg := bigquerygettableinfo.Config{
+		ConfigBase: tools.ConfigBase{
+			Name:        "get_table_info_tool",
+			Description: "Get Table Info",
+		},
+		Type:   "bigquery-get-table-info",
+		Source: "my-bq-source",
+	}
+	tool, err := cfg.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("failed to initialize tool: %v", err)
+	}
+	getTableInfoTool, ok := tool.(bigquerygettableinfo.Tool)
+	if !ok {
+		t.Fatalf("expected bigquerygettableinfo.Tool, got %T", tool)
+	}
+
+	params, err := getTableInfoTool.GetParameters(source)
+	if err != nil {
+		t.Fatalf("failed to get parameters: %v", err)
+	}
+
+	// The allowed table must succeed (no allowlist error).
+	allowedData := map[string]any{"project": "p", "dataset": "d", "table": "allowed"}
+	allowedParams, err := parameters.ParseParams(params, allowedData, nil)
+	if err != nil {
+		t.Fatalf("unexpected error parsing parameters: %v", err)
+	}
+	if _, err := tool.Invoke(ctx, source, allowedParams, ""); err != nil {
+		t.Fatalf("expected allowed table to succeed, got error: %v", err)
+	}
+
+	// A sibling table not in the allowlist must be rejected, even though it
+	// lives in the same dataset as the allowed table.
+	deniedData := map[string]any{"project": "p", "dataset": "d", "table": "secret"}
+	deniedParams, err := parameters.ParseParams(params, deniedData, nil)
+	if err != nil {
+		t.Fatalf("unexpected error parsing parameters: %v", err)
+	}
+	_, err = tool.Invoke(ctx, source, deniedParams, "")
+	if err == nil || !strings.Contains(err.Error(), "access denied to table") {
+		t.Fatalf("expected access-denied error for unlisted table, got: %v", err)
+	}
 }

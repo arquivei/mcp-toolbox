@@ -70,6 +70,8 @@ type compatibleSource interface {
 	GetAuthTokenHeaderName() string
 	IsDatasetAllowed(projectID, datasetID string) bool
 	BigQueryAllowedDatasets() []string
+	IsTableAllowed(projectID, datasetID, tableID string) bool
+	BigQueryAllowedTables() []string
 }
 
 type BQTableReference struct {
@@ -129,7 +131,7 @@ func (cfg Config) Initialize(context.Context) (tools.Tool, error) {
 		return nil, fmt.Errorf("description is required for tool %q", cfg.Name)
 	}
 
-	params := buildParams(nil)
+	params := buildParams(nil, nil)
 	return Tool{
 		BaseTool: tools.NewBaseTool(
 			cfg,
@@ -208,10 +210,10 @@ func (t Tool) Invoke(ctx context.Context, s sources.Source, params parameters.Pa
 		}
 	}
 
-	if len(source.BigQueryAllowedDatasets()) > 0 {
+	if len(source.BigQueryAllowedDatasets()) > 0 || len(source.BigQueryAllowedTables()) > 0 {
 		for _, tableRef := range tableRefs {
-			if !source.IsDatasetAllowed(tableRef.ProjectID, tableRef.DatasetID) {
-				return nil, util.NewAgentError(fmt.Sprintf("access to dataset '%s.%s' (from table '%s') is not allowed", tableRef.ProjectID, tableRef.DatasetID, tableRef.TableID), nil)
+			if !source.IsTableAllowed(tableRef.ProjectID, tableRef.DatasetID, tableRef.TableID) {
+				return nil, util.NewAgentError(fmt.Sprintf("access to table '%s.%s.%s' is not allowed", tableRef.ProjectID, tableRef.DatasetID, tableRef.TableID), nil)
 			}
 		}
 	}
@@ -434,8 +436,9 @@ func (t Tool) GetAuthTokenHeaderName(source sources.Source) (string, error) {
 	return s.GetAuthTokenHeaderName(), nil
 }
 
-// resolveParams builds the tool's parameters using the source's allowed-dataset configuration.
-func buildParams(allowedDatasets []string) parameters.Parameters {
+// resolveParams builds the tool's parameters using the source's allowed-dataset/allowed-table
+// configuration.
+func buildParams(allowedDatasets, allowedTables []string) parameters.Parameters {
 	tableRefsDescription := `A JSON string of a list of BigQuery tables to use as context. Each object in the list must contain 'projectId', 'datasetId', and 'tableId'. Example: '[{"projectId": "my-gcp-project", "datasetId": "my_dataset", "tableId": "my_table"}]'.`
 	if len(allowedDatasets) > 0 {
 		datasetIDs := []string{}
@@ -443,6 +446,13 @@ func buildParams(allowedDatasets []string) parameters.Parameters {
 			datasetIDs = append(datasetIDs, fmt.Sprintf("`%s`", ds))
 		}
 		tableRefsDescription += fmt.Sprintf(" The tables must only be from datasets in the following list: %s.", strings.Join(datasetIDs, ", "))
+	}
+	if len(allowedTables) > 0 {
+		tableIDs := make([]string, 0, len(allowedTables))
+		for _, tbl := range allowedTables {
+			tableIDs = append(tableIDs, fmt.Sprintf("`%s`", tbl))
+		}
+		tableRefsDescription += fmt.Sprintf(" These specific tables or views are also allowed: %s.", strings.Join(tableIDs, ", "))
 	}
 	userQueryParameter := parameters.NewStringParameter("user_query_with_context", "The user's question, potentially including conversation history and system instructions for context.")
 	tableRefsParameter := parameters.NewStringParameter("table_references", tableRefsDescription)
@@ -454,7 +464,7 @@ func (t Tool) resolveParams(source sources.Source) (parameters.Parameters, error
 	if !ok {
 		return nil, fmt.Errorf("invalid source for %q tool: source %q is not a compatible type", t.Cfg.Type, t.Cfg.Source)
 	}
-	return buildParams(s.BigQueryAllowedDatasets()), nil
+	return buildParams(s.BigQueryAllowedDatasets(), s.BigQueryAllowedTables()), nil
 }
 
 // GetParameters returns the tool's parameters, resolved against the source.

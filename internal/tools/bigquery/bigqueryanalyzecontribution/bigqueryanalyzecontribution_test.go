@@ -15,6 +15,7 @@
 package bigqueryanalyzecontribution_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -360,8 +361,303 @@ func TestInvokeAllowedDatasetsValidation(t *testing.T) {
 		t.Fatal("expected Invoke to return an error due to out-of-allowlist dataset reference, but got nil")
 	}
 
-	expectedErr := "query accesses dataset 'test-project.unauthorized_dataset', which is not in the allowed list"
+	expectedErr := "query accesses table 'test-project.unauthorized_dataset.some_table', which is not in the allowed list"
 	if !strings.Contains(err.Error(), expectedErr) {
 		t.Errorf("expected error to contain %q, got: %v", expectedErr, err)
+	}
+}
+
+func TestInvokeAllowedTablesValidation(t *testing.T) {
+	mockClient := &http.Client{
+		Transport: &mockTransport{
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				var reqBody []byte
+				if req.Body != nil {
+					b, _ := io.ReadAll(req.Body)
+					reqBody = b
+					req.Body = io.NopCloser(bytes.NewReader(reqBody))
+				}
+
+				var body struct {
+					Configuration struct {
+						DryRun bool `json:"dryRun"`
+					} `json:"configuration"`
+				}
+				_ = json.Unmarshal(reqBody, &body)
+
+				if body.Configuration.DryRun {
+					respBody := `{
+						"kind": "bigquery#job",
+						"jobReference": {"projectId": "p", "jobId": "mock-job-id"},
+						"status": {"state": "DONE"},
+						"statistics": {
+							"query": {
+								"referencedTables": [
+									{"projectId": "p", "datasetId": "d", "tableId": "input"}
+								]
+							}
+						}
+					}`
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(respBody)),
+					}, nil
+				}
+
+				respBody := `{
+					"kind": "bigquery#job",
+					"jobReference": {"projectId": "p", "jobId": "mock-job-id"},
+					"status": {"state": "DONE"}
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(respBody)),
+				}, nil
+			},
+		},
+	}
+	bqClient, err := bigqueryapi.NewClient(context.Background(), "p", option.WithHTTPClient(mockClient))
+	if err != nil {
+		t.Fatalf("failed to create bigquery client: %v", err)
+	}
+
+	// Table allowed individually, dataset not allowed.
+	source := &bigquerycommon.MockSource{
+		Client:        bqClient,
+		AllowedTables: []string{"p.d.input"},
+		RunSQLResult:  "mocked_analyze_contribution_result",
+	}
+
+	cfg := bigqueryanalyzecontribution.Config{
+		ConfigBase: tools.ConfigBase{
+			Name:        "analyze_contribution_tool",
+			Description: "Analyze Contribution",
+		},
+		Type:   "bigquery-analyze-contribution",
+		Source: "my-bq-source",
+	}
+	tool, err := cfg.Initialize(context.Background())
+	if err != nil {
+		t.Fatalf("failed to initialize tool: %v", err)
+	}
+	analyzeContributionTool, ok := tool.(bigqueryanalyzecontribution.Tool)
+	if !ok {
+		t.Fatalf("expected bigqueryanalyzecontribution.Tool, got %T", tool)
+	}
+
+	ctx, err := testutils.ContextWithNewLogger()
+	if err != nil {
+		t.Fatalf("failed to create context with logger: %v", err)
+	}
+
+	params, err := analyzeContributionTool.GetParameters(source)
+	if err != nil {
+		t.Fatalf("failed to get parameters: %v", err)
+	}
+
+	// Table allowed individually, dataset not allowed: should pass the
+	// allowlist gate. Any remaining error must not be the "is not allowed"
+	// allowlist error.
+	data := map[string]any{
+		"input_data":          "p.d.input",
+		"contribution_metric": "SUM(v)",
+		"is_test_col":         "is_test",
+		"dimension_id_cols":   []any{"dim"},
+	}
+	paramVals, err := parameters.ParseParams(params, data, nil)
+	if err != nil {
+		t.Fatalf("unexpected error parsing parameters: %v", err)
+	}
+	if _, err := tool.Invoke(ctx, source, paramVals, ""); err != nil && strings.Contains(err.Error(), "is not allowed") {
+		t.Fatalf("allowed table was rejected by the allowlist: %s", err)
+	}
+
+	// Sibling table in the same dataset: must be rejected by the gate.
+	data2 := map[string]any{
+		"input_data":          "p.d.other",
+		"contribution_metric": "SUM(v)",
+		"is_test_col":         "is_test",
+		"dimension_id_cols":   []any{"dim"},
+	}
+	paramVals2, err := parameters.ParseParams(params, data2, nil)
+	if err != nil {
+		t.Fatalf("unexpected error parsing parameters: %v", err)
+	}
+	_, err = tool.Invoke(ctx, source, paramVals2, "")
+	if err == nil || !strings.Contains(err.Error(), "is not allowed") {
+		t.Fatalf("sibling table was not rejected; got err = %v", err)
+	}
+}
+
+// TestInvokeGate2RejectsUnlistedReferencedTable proves the dry-run gate
+// (gate 2) fires independently of the declared-table gate (gate 1): the
+// declared input_data table itself is allowed, so gate 1 passes cleanly, but
+// the dry run reports an additional referenced table (e.g. a view's
+// underlying base table) that is not in AllowedTables, so gate 2 must reject
+// it. This guards against the gate condition regressing from
+// `len(AllowedDatasets) > 0 || len(AllowedTables) > 0` back to
+// `len(AllowedDatasets) > 0` alone.
+func TestInvokeGate2RejectsUnlistedReferencedTable(t *testing.T) {
+	mockClient := &http.Client{
+		Transport: &mockTransport{
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				var reqBody []byte
+				if req.Body != nil {
+					b, _ := io.ReadAll(req.Body)
+					reqBody = b
+					req.Body = io.NopCloser(bytes.NewReader(reqBody))
+				}
+
+				var body struct {
+					Configuration struct {
+						DryRun bool `json:"dryRun"`
+					} `json:"configuration"`
+				}
+				_ = json.Unmarshal(reqBody, &body)
+
+				if body.Configuration.DryRun {
+					respBody := `{
+						"kind": "bigquery#job",
+						"jobReference": {"projectId": "p", "jobId": "mock-job-id"},
+						"status": {"state": "DONE"},
+						"statistics": {
+							"query": {
+								"referencedTables": [
+									{"projectId": "p", "datasetId": "d", "tableId": "input"},
+									{"projectId": "p", "datasetId": "d", "tableId": "unlisted_base"}
+								]
+							}
+						}
+					}`
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(respBody)),
+					}, nil
+				}
+
+				respBody := `{
+					"kind": "bigquery#job",
+					"jobReference": {"projectId": "p", "jobId": "mock-job-id"},
+					"status": {"state": "DONE"}
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(respBody)),
+				}, nil
+			},
+		},
+	}
+	bqClient, err := bigqueryapi.NewClient(context.Background(), "p", option.WithHTTPClient(mockClient))
+	if err != nil {
+		t.Fatalf("failed to create bigquery client: %v", err)
+	}
+
+	// Tables-only config: AllowedDatasets is empty, only AllowedTables is set.
+	source := &bigquerycommon.MockSource{
+		Client:        bqClient,
+		AllowedTables: []string{"p.d.input"},
+		RunSQLResult:  "mocked_analyze_contribution_result",
+	}
+
+	cfg := bigqueryanalyzecontribution.Config{
+		ConfigBase: tools.ConfigBase{
+			Name:        "analyze_contribution_tool",
+			Description: "Analyze Contribution",
+		},
+		Type:   "bigquery-analyze-contribution",
+		Source: "my-bq-source",
+	}
+	tool, err := cfg.Initialize(context.Background())
+	if err != nil {
+		t.Fatalf("failed to initialize tool: %v", err)
+	}
+	analyzeContributionTool, ok := tool.(bigqueryanalyzecontribution.Tool)
+	if !ok {
+		t.Fatalf("expected bigqueryanalyzecontribution.Tool, got %T", tool)
+	}
+
+	ctx, err := testutils.ContextWithNewLogger()
+	if err != nil {
+		t.Fatalf("failed to create context with logger: %v", err)
+	}
+
+	params, err := analyzeContributionTool.GetParameters(source)
+	if err != nil {
+		t.Fatalf("failed to get parameters: %v", err)
+	}
+
+	// Declared table is allowed (passes gate 1 cleanly), but the dry run's
+	// referencedTables includes an unlisted table, so gate 2 must reject it.
+	data := map[string]any{
+		"input_data":          "p.d.input",
+		"contribution_metric": "SUM(v)",
+		"is_test_col":         "is_test",
+		"dimension_id_cols":   []any{"dim"},
+	}
+	paramVals, err := parameters.ParseParams(params, data, nil)
+	if err != nil {
+		t.Fatalf("unexpected error parsing parameters: %v", err)
+	}
+	_, err = tool.Invoke(ctx, source, paramVals, "")
+	if err == nil {
+		t.Fatal("expected Invoke to return an error due to an unlisted referenced table, but got nil")
+	}
+	expectedErr := "query accesses table 'p.d.unlisted_base', which is not in the allowed list"
+	if !strings.Contains(err.Error(), expectedErr) {
+		t.Errorf("expected error to contain %q, got: %v", expectedErr, err)
+	}
+}
+
+// TestGetParametersMentionsAllowedTablesOnlyConfig proves that a
+// tables-only allowlist (no AllowedDatasets) is still surfaced in the
+// `input_data` parameter description. Invoke enforces AllowedTables via
+// IsTableAllowed regardless of AllowedDatasets, but before this fix the
+// description only branched on len(allowedDatasets) > 0, so an agent reading
+// the tool's own documented interface would see no restriction at all.
+func TestGetParametersMentionsAllowedTablesOnlyConfig(t *testing.T) {
+	ctx, err := testutils.ContextWithNewLogger()
+	if err != nil {
+		t.Fatalf("failed to create context with logger: %v", err)
+	}
+	source := &bigquerycommon.MockSource{
+		AllowedTables: []string{"p.d.input"},
+	}
+	cfg := bigqueryanalyzecontribution.Config{
+		ConfigBase: tools.ConfigBase{
+			Name:        "analyze_contribution_tool",
+			Description: "Analyze contribution",
+		},
+		Type:   "bigquery-analyze-contribution",
+		Source: "my-bq-source",
+	}
+	tool, err := cfg.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("failed to initialize tool: %v", err)
+	}
+	analyzeTool, ok := tool.(bigqueryanalyzecontribution.Tool)
+	if !ok {
+		t.Fatalf("expected bigqueryanalyzecontribution.Tool, got %T", tool)
+	}
+	params, err := analyzeTool.GetParameters(source)
+	if err != nil {
+		t.Fatalf("failed to get parameters: %v", err)
+	}
+	var inputDataDesc string
+	found := false
+	for _, p := range params {
+		if p.GetName() == "input_data" {
+			inputDataDesc = p.GetDesc()
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("input_data parameter not found")
+	}
+	if !strings.Contains(inputDataDesc, "p.d.input") {
+		t.Errorf("input_data description does not mention allowed table 'p.d.input' from a tables-only config; got: %s", inputDataDesc)
 	}
 }

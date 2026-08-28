@@ -340,8 +340,279 @@ func TestInvokeAllowedDatasetsValidation(t *testing.T) {
 		t.Fatal("expected Invoke to return an error due to out-of-allowlist dataset reference, but got nil")
 	}
 
-	expectedErr := "query accesses dataset 'test-project.unauthorized_dataset', which is not in the allowed list"
+	expectedErr := "query accesses table 'test-project.unauthorized_dataset.some_table', which is not in the allowed list"
 	if !strings.Contains(err.Error(), expectedErr) {
 		t.Errorf("expected error to contain %q, got: %v", expectedErr, err)
+	}
+}
+
+func TestInvokeAllowedTablesValidation(t *testing.T) {
+	// Mock server backing the dry-run request only; the actual query
+	// execution goes through MockSource.RunSQL, which never hits the network.
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+			var body struct {
+				Configuration struct {
+					DryRun bool `json:"dryRun"`
+				} `json:"configuration"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if body.Configuration.DryRun {
+				resp := map[string]any{
+					"kind":         "bigquery#job",
+					"jobReference": map[string]string{"projectId": "p", "jobId": "mock-job-id"},
+					"status":       map[string]any{"state": "DONE"},
+					"statistics": map[string]any{
+						"creationTime": "123456789",
+						"startTime":    "123456789",
+						"endTime":      "123456789",
+						"query": map[string]any{
+							"referencedTables": []map[string]any{
+								{"projectId": "p", "datasetId": "d", "tableId": "history"},
+							},
+						},
+					},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			}
+		}
+		http.Error(w, "not implemented", http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	ctx, err := testutils.ContextWithNewLogger()
+	if err != nil {
+		t.Fatalf("failed to create context with logger: %v", err)
+	}
+
+	bqClient, err := bigqueryapi.NewClient(ctx, "p", option.WithEndpoint(mockServer.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create mocked BigQuery client: %v", err)
+	}
+
+	// Table allowed individually, dataset not allowed.
+	source := &bigquerycommon.MockSource{
+		Client:        bqClient,
+		AllowedTables: []string{"p.d.history"},
+		RunSQLResult:  "mocked_forecast_result",
+	}
+
+	cfg := bigqueryforecast.Config{
+		ConfigBase: tools.ConfigBase{
+			Name:        "forecast_tool",
+			Description: "Forecast",
+		},
+		Type:   "bigquery-forecast",
+		Source: "my-bq-source",
+	}
+	tool, err := cfg.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("failed to initialize tool: %v", err)
+	}
+	forecastTool, ok := tool.(bigqueryforecast.Tool)
+	if !ok {
+		t.Fatalf("expected bigqueryforecast.Tool, got %T", tool)
+	}
+
+	params, err := forecastTool.GetParameters(source)
+	if err != nil {
+		t.Fatalf("failed to get parameters: %v", err)
+	}
+
+	// Table allowed individually, dataset not allowed: should pass the
+	// allowlist gate. Any remaining error must not be the "is not allowed"
+	// allowlist error.
+	data := map[string]any{
+		"history_data":  "p.d.history",
+		"timestamp_col": "ts",
+		"data_col":      "v",
+		"horizon":       5,
+	}
+	paramVals, err := parameters.ParseParams(params, data, nil)
+	if err != nil {
+		t.Fatalf("unexpected error parsing parameters: %v", err)
+	}
+	if _, err := tool.Invoke(ctx, source, paramVals, ""); err != nil && strings.Contains(err.Error(), "is not allowed") {
+		t.Fatalf("allowed table was rejected by the allowlist: %s", err)
+	}
+
+	// Sibling table in the same dataset: must be rejected by the gate.
+	data2 := map[string]any{
+		"history_data":  "p.d.other",
+		"timestamp_col": "ts",
+		"data_col":      "v",
+		"horizon":       5,
+	}
+	paramVals2, err := parameters.ParseParams(params, data2, nil)
+	if err != nil {
+		t.Fatalf("unexpected error parsing parameters: %v", err)
+	}
+	_, err = tool.Invoke(ctx, source, paramVals2, "")
+	if err == nil || !strings.Contains(err.Error(), "is not allowed") {
+		t.Fatalf("sibling table was not rejected; got err = %v", err)
+	}
+}
+
+// TestInvokeGate2RejectsUnlistedReferencedTable proves the dry-run gate
+// (gate 2) fires independently of the declared-table gate (gate 1): the
+// declared history_data table itself is allowed, so gate 1 passes cleanly,
+// but the dry run reports an additional referenced table (e.g. a view's
+// underlying base table) that is not in AllowedTables, so gate 2 must reject
+// it. This guards against the gate condition regressing from
+// `len(AllowedDatasets) > 0 || len(AllowedTables) > 0` back to
+// `len(AllowedDatasets) > 0` alone.
+func TestInvokeGate2RejectsUnlistedReferencedTable(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+			var body struct {
+				Configuration struct {
+					DryRun bool `json:"dryRun"`
+				} `json:"configuration"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if body.Configuration.DryRun {
+				resp := map[string]any{
+					"kind":         "bigquery#job",
+					"jobReference": map[string]string{"projectId": "p", "jobId": "mock-job-id"},
+					"status":       map[string]any{"state": "DONE"},
+					"statistics": map[string]any{
+						"creationTime": "123456789",
+						"startTime":    "123456789",
+						"endTime":      "123456789",
+						"query": map[string]any{
+							"referencedTables": []map[string]any{
+								{"projectId": "p", "datasetId": "d", "tableId": "history"},
+								// Base table behind a view, not explicitly allowed.
+								{"projectId": "p", "datasetId": "d", "tableId": "unlisted_base"},
+							},
+						},
+					},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			}
+		}
+		http.Error(w, "not implemented", http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	ctx, err := testutils.ContextWithNewLogger()
+	if err != nil {
+		t.Fatalf("failed to create context with logger: %v", err)
+	}
+
+	bqClient, err := bigqueryapi.NewClient(ctx, "p", option.WithEndpoint(mockServer.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create mocked BigQuery client: %v", err)
+	}
+
+	// Tables-only config: AllowedDatasets is empty, only AllowedTables is set.
+	source := &bigquerycommon.MockSource{
+		Client:        bqClient,
+		AllowedTables: []string{"p.d.history"},
+		RunSQLResult:  "mocked_forecast_result",
+	}
+
+	cfg := bigqueryforecast.Config{
+		ConfigBase: tools.ConfigBase{
+			Name:        "forecast_tool",
+			Description: "Forecast",
+		},
+		Type:   "bigquery-forecast",
+		Source: "my-bq-source",
+	}
+	tool, err := cfg.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("failed to initialize tool: %v", err)
+	}
+	forecastTool, ok := tool.(bigqueryforecast.Tool)
+	if !ok {
+		t.Fatalf("expected bigqueryforecast.Tool, got %T", tool)
+	}
+
+	params, err := forecastTool.GetParameters(source)
+	if err != nil {
+		t.Fatalf("failed to get parameters: %v", err)
+	}
+
+	// Declared table is allowed (passes gate 1 cleanly), but the dry run's
+	// referencedTables includes an unlisted table, so gate 2 must reject it.
+	data := map[string]any{
+		"history_data":  "p.d.history",
+		"timestamp_col": "ts",
+		"data_col":      "v",
+		"horizon":       5,
+	}
+	paramVals, err := parameters.ParseParams(params, data, nil)
+	if err != nil {
+		t.Fatalf("unexpected error parsing parameters: %v", err)
+	}
+	_, err = tool.Invoke(ctx, source, paramVals, "")
+	if err == nil {
+		t.Fatal("expected Invoke to return an error due to an unlisted referenced table, but got nil")
+	}
+	expectedErr := "query accesses table 'p.d.unlisted_base', which is not in the allowed list"
+	if !strings.Contains(err.Error(), expectedErr) {
+		t.Errorf("expected error to contain %q, got: %v", expectedErr, err)
+	}
+}
+
+// TestGetParametersMentionsAllowedTablesOnlyConfig proves that a
+// tables-only allowlist (no AllowedDatasets) is still surfaced in the
+// `history_data` parameter description. Invoke enforces AllowedTables via
+// IsTableAllowed regardless of AllowedDatasets, but before this fix the
+// description only branched on len(allowedDatasets) > 0, so an agent reading
+// the tool's own documented interface would see no restriction at all and
+// only discover it through a failed call.
+func TestGetParametersMentionsAllowedTablesOnlyConfig(t *testing.T) {
+	ctx, err := testutils.ContextWithNewLogger()
+	if err != nil {
+		t.Fatalf("failed to create context with logger: %v", err)
+	}
+	source := &bigquerycommon.MockSource{
+		AllowedTables: []string{"p.d.history"},
+	}
+	cfg := bigqueryforecast.Config{
+		ConfigBase: tools.ConfigBase{
+			Name:        "forecast_tool",
+			Description: "Forecast",
+		},
+		Type:   "bigquery-forecast",
+		Source: "my-bq-source",
+	}
+	tool, err := cfg.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("failed to initialize tool: %v", err)
+	}
+	forecastTool, ok := tool.(bigqueryforecast.Tool)
+	if !ok {
+		t.Fatalf("expected bigqueryforecast.Tool, got %T", tool)
+	}
+	params, err := forecastTool.GetParameters(source)
+	if err != nil {
+		t.Fatalf("failed to get parameters: %v", err)
+	}
+	var historyDataDesc string
+	found := false
+	for _, p := range params {
+		if p.GetName() == "history_data" {
+			historyDataDesc = p.GetDesc()
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("history_data parameter not found")
+	}
+	if !strings.Contains(historyDataDesc, "p.d.history") {
+		t.Errorf("history_data description does not mention allowed table 'p.d.history' from a tables-only config; got: %s", historyDataDesc)
 	}
 }

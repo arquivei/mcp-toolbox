@@ -18,6 +18,7 @@ import (
 	"context"
 	"math/big"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -194,6 +195,34 @@ func TestParseFromYamlBigQuery(t *testing.T) {
 					Project:         "my-project",
 					Location:        "us",
 					AllowedDatasets: []string{"my_dataset"},
+				},
+			},
+		},
+		{
+			desc: "with allowed tables example",
+			in: `
+			kind: source
+			name: my-instance
+			type: bigquery
+			project: my-project
+			location: us
+			allowedDatasets:
+			- my_dataset
+			allowedTables:
+			- my-project.other_dataset.my_table
+			- my-project.other_dataset.my_view
+			`,
+			want: map[string]sources.SourceConfig{
+				"my-instance": bigquery.Config{
+					Name:            "my-instance",
+					Type:            bigquery.SourceType,
+					Project:         "my-project",
+					Location:        "us",
+					AllowedDatasets: []string{"my_dataset"},
+					AllowedTables: []string{
+						"my-project.other_dataset.my_table",
+						"my-project.other_dataset.my_view",
+					},
 				},
 			},
 		},
@@ -400,6 +429,63 @@ func TestInitialize_MaxQueryResultRows(t *testing.T) {
 	}
 }
 
+func TestInitialize_AllowedTables(t *testing.T) {
+	ctx, err := testutils.ContextWithNewLogger()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	ctx = util.WithUserAgent(ctx, "test-agent")
+	tracer := noop.NewTracerProvider().Tracer("")
+
+	tcs := []struct {
+		desc     string
+		in       []string
+		datasets []string
+		err      string
+	}{
+		{
+			desc: "two parts is rejected",
+			in:   []string{"my_dataset.my_table"},
+			err:  `invalid allowedTable format: "my_dataset.my_table", expected 'project.dataset.table'`,
+		},
+		{
+			desc: "four parts is rejected",
+			in:   []string{"a.b.c.d"},
+			err:  `invalid allowedTable format: "a.b.c.d", expected 'project.dataset.table'`,
+		},
+		{
+			desc: "wildcard is rejected",
+			in:   []string{"my-project.my_dataset.events_*"},
+			err:  `invalid allowedTable "my-project.my_dataset.events_*": wildcard tables are not supported; allow the whole dataset via allowedDatasets instead`,
+		},
+		{
+			desc:     "table whose dataset is already in allowedDatasets is rejected",
+			in:       []string{"my-project.my_dataset.my_table"},
+			datasets: []string{"my_dataset"},
+			err:      `invalid allowedTable "my-project.my_dataset.my_table": dataset "my-project.my_dataset" is already in allowedDatasets, which takes precedence and makes this entry redundant; remove it from allowedTables or from allowedDatasets`,
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.desc, func(t *testing.T) {
+			cfg := bigquery.Config{
+				Name:            "my-instance",
+				Type:            bigquery.SourceType,
+				Project:         "my-project",
+				UseClientOAuth:  "true",
+				AllowedDatasets: tc.datasets,
+				AllowedTables:   tc.in,
+			}
+			_, err := cfg.Initialize(ctx, tracer)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.err) {
+				t.Fatalf("expected error containing %q, got %q", tc.err, err.Error())
+			}
+		})
+	}
+}
+
 func TestInitialize_MaximumBytesBilled(t *testing.T) {
 	ctx, err := testutils.ContextWithNewLogger()
 	if err != nil {
@@ -552,5 +638,146 @@ func TestNormalizeValue(t *testing.T) {
 				t.Errorf("NormalizeValue() = %v, want %v", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestIsTableAllowed(t *testing.T) {
+	newSource := func(datasets, tables []string) *bigquery.Source {
+		cfg := bigquery.Config{
+			Name:            "my-instance",
+			Type:            bigquery.SourceType,
+			Project:         "my-project",
+			UseClientOAuth:  "true",
+			AllowedDatasets: datasets,
+			AllowedTables:   tables,
+		}
+		s, err := cfg.Initialize(util.WithUserAgent(context.Background(), "test-agent"), noop.NewTracerProvider().Tracer("test"))
+		if err != nil {
+			t.Fatalf("unable to initialize source: %s", err)
+		}
+		src, ok := s.(*bigquery.Source)
+		if !ok {
+			t.Fatalf("initialize returned %T, want *bigquery.Source", s)
+		}
+		return src
+	}
+
+	tcs := []struct {
+		desc     string
+		datasets []string
+		tables   []string
+		project  string
+		dataset  string
+		table    string
+		want     bool
+	}{
+		{
+			desc: "no restriction allows anything",
+			want: true, project: "p", dataset: "d", table: "t",
+		},
+		{
+			desc:    "table in allowedTables is allowed",
+			tables:  []string{"p.d.t"},
+			project: "p", dataset: "d", table: "t",
+			want: true,
+		},
+		{
+			desc:    "sibling table in same dataset is denied",
+			tables:  []string{"p.d.t"},
+			project: "p", dataset: "d", table: "other",
+			want: false,
+		},
+		{
+			desc:     "whole dataset allowed covers any table in it",
+			datasets: []string{"p.d"},
+			project:  "p", dataset: "d", table: "anything",
+			want: true,
+		},
+		{
+			desc:     "dataset allowed does not cover another dataset",
+			datasets: []string{"p.d"},
+			project:  "p", dataset: "other", table: "t",
+			want: false,
+		},
+		{
+			desc:     "OR semantics: dataset entry and table entry coexist",
+			datasets: []string{"p.d"},
+			tables:   []string{"p.other.t"},
+			project:  "p", dataset: "other", table: "t",
+			want: true,
+		},
+		{
+			desc:    "wildcard denied when it would rely on a table entry",
+			tables:  []string{"p.d.events_2026"},
+			project: "p", dataset: "d", table: "events_*",
+			want: false,
+		},
+		{
+			desc:     "wildcard allowed when the dataset is allowed outright",
+			datasets: []string{"p.d"},
+			project:  "p", dataset: "d", table: "events_*",
+			want: true,
+		},
+		{
+			desc:    "table entry does not leak across projects",
+			tables:  []string{"p.d.t"},
+			project: "other-project", dataset: "d", table: "t",
+			want: false,
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.desc, func(t *testing.T) {
+			src := newSource(tc.datasets, tc.tables)
+			got := src.IsTableAllowed(tc.project, tc.dataset, tc.table)
+			if got != tc.want {
+				t.Fatalf("IsTableAllowed(%q, %q, %q) = %v, want %v",
+					tc.project, tc.dataset, tc.table, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsDatasetVisible(t *testing.T) {
+	cfg := bigquery.Config{
+		Name:           "my-instance",
+		Type:           bigquery.SourceType,
+		Project:        "my-project",
+		UseClientOAuth: "true",
+		AllowedTables:  []string{"p.d.t"},
+	}
+	s, err := cfg.Initialize(util.WithUserAgent(context.Background(), "test-agent"), noop.NewTracerProvider().Tracer("test"))
+	if err != nil {
+		t.Fatalf("unable to initialize source: %s", err)
+	}
+	src := s.(*bigquery.Source)
+
+	if !src.IsDatasetVisible("p", "d") {
+		t.Errorf("IsDatasetVisible(p, d) = false, want true (dataset has an allowed table)")
+	}
+	if src.IsDatasetVisible("p", "other") {
+		t.Errorf("IsDatasetVisible(p, other) = true, want false")
+	}
+}
+
+func TestBigQueryAllowedTablesIsSorted(t *testing.T) {
+	cfg := bigquery.Config{
+		Name:           "my-instance",
+		Type:           bigquery.SourceType,
+		Project:        "my-project",
+		UseClientOAuth: "true",
+		AllowedTables:  []string{"p.d.zebra", "p.d.alpha", "p.d.mid"},
+	}
+	s, err := cfg.Initialize(util.WithUserAgent(context.Background(), "test-agent"), noop.NewTracerProvider().Tracer("test"))
+	if err != nil {
+		t.Fatalf("unable to initialize source: %s", err)
+	}
+	src := s.(*bigquery.Source)
+
+	want := []string{"p.d.alpha", "p.d.mid", "p.d.zebra"}
+	for i := 0; i < 5; i++ { // stable ordering across calls, not just sorted once
+		got := src.BigQueryAllowedTables()
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Fatalf("BigQueryAllowedTables() (-want +got):\n%s", diff)
+		}
 	}
 }

@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 
 	bigqueryapi "cloud.google.com/go/bigquery"
 	yaml "github.com/goccy/go-yaml"
@@ -51,6 +53,7 @@ type compatibleSource interface {
 	UseClientAuthorization() bool
 	GetAuthTokenHeaderName() string
 	BigQueryAllowedDatasets() []string
+	BigQueryAllowedTables() []string
 	RetrieveClientAndService(tools.AccessToken) (*bigqueryapi.Client, *bigqueryrestapi.Service, error)
 }
 
@@ -73,7 +76,7 @@ func (cfg Config) Initialize(context.Context) (tools.Tool, error) {
 		return nil, fmt.Errorf("description is required for tool %q", cfg.Name)
 	}
 
-	params := buildParams(nil, "")
+	params := buildParams(nil, nil, "")
 	return Tool{
 		BaseTool: tools.NewBaseTool(
 			cfg,
@@ -112,8 +115,31 @@ func (t Tool) Invoke(ctx context.Context, s sources.Source, params parameters.Pa
 	if !ok {
 		return nil, util.NewClientServerError("source used is not compatible with the tool", http.StatusInternalServerError, nil)
 	}
-	if len(source.BigQueryAllowedDatasets()) > 0 {
-		return source.BigQueryAllowedDatasets(), nil
+	if len(source.BigQueryAllowedDatasets()) > 0 || len(source.BigQueryAllowedTables()) > 0 {
+		seen := make(map[string]struct{})
+		out := []string{}
+		for _, ds := range source.BigQueryAllowedDatasets() {
+			if _, ok := seen[ds]; !ok {
+				seen[ds] = struct{}{}
+				out = append(out, ds)
+			}
+		}
+		// Also surface datasets that are only reachable via a table entry, so the
+		// agent can discover a dataset it has a table-level allowance into, even
+		// without a full dataset allowance.
+		for _, tbl := range source.BigQueryAllowedTables() {
+			parts := strings.Split(tbl, ".")
+			if len(parts) != 3 {
+				continue
+			}
+			ds := fmt.Sprintf("%s.%s", parts[0], parts[1])
+			if _, ok := seen[ds]; !ok {
+				seen[ds] = struct{}{}
+				out = append(out, ds)
+			}
+		}
+		sort.Strings(out)
+		return out, nil
 	}
 	mapParams := params.AsMap()
 	projectId, ok := mapParams[projectKey].(string)
@@ -165,24 +191,30 @@ func (t Tool) GetAuthTokenHeaderName(source sources.Source) (string, error) {
 	return s.GetAuthTokenHeaderName(), nil
 }
 
-// buildParams builds the tool's parameters from the source's allowed-dataset configuration.
-// A nil allow-list and empty default project yield the plain skeleton.
-func buildParams(allowedDatasets []string, defaultProject string) parameters.Parameters {
+// buildParams builds the tool's parameters from the source's allowed-dataset/allowed-table
+// configuration. Nil allow-lists and an empty default project yield the plain skeleton.
+//
+// Invoke ignores the `project` parameter entirely whenever either allowedDatasets or
+// allowedTables restrict the tool (it derives all discoverable datasets from the allowlists
+// regardless of what project is passed), so the description here must reflect that for
+// either allow-list, not just allowedDatasets.
+func buildParams(allowedDatasets, allowedTables []string, defaultProject string) parameters.Parameters {
 	projectParameterDescription := "The Google Cloud project to list dataset ids."
-	if len(allowedDatasets) > 0 {
+	if len(allowedDatasets) > 0 || len(allowedTables) > 0 {
 		projectParameterDescription = "This parameter will be ignored. The list of datasets is restricted to a pre-configured list; No need to provide a project ID."
 	}
 	projectParameter := parameters.NewStringParameter(projectKey, projectParameterDescription, parameters.WithStringDefault(defaultProject))
 	return parameters.Parameters{projectParameter}
 }
 
-// resolveParams builds the tool's parameters using the source's allowed-dataset configuration.
+// resolveParams builds the tool's parameters using the source's allowed-dataset/allowed-table
+// configuration.
 func (t Tool) resolveParams(source sources.Source) (parameters.Parameters, error) {
 	s, ok := source.(compatibleSource)
 	if !ok {
 		return nil, fmt.Errorf("invalid source for %q tool: source %q is not a compatible type", t.Cfg.Type, t.Cfg.Source)
 	}
-	return buildParams(s.BigQueryAllowedDatasets(), s.BigQueryProject()), nil
+	return buildParams(s.BigQueryAllowedDatasets(), s.BigQueryAllowedTables(), s.BigQueryProject()), nil
 }
 
 // GetParameters returns the tool's parameters, resolved against the source.

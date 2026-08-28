@@ -17,6 +17,7 @@ package bigquerycommon
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	bigqueryapi "cloud.google.com/go/bigquery"
 	"github.com/googleapis/mcp-toolbox/internal/sources"
@@ -28,12 +29,33 @@ import (
 // MockSource is a reusable mock implementation of sources.Source for BigQuery tool tests.
 type MockSource struct {
 	sources.Source
-	CalledSQL       string
-	Client          *bigqueryapi.Client
-	Service         *bigqueryrestapi.Service
-	AllowedDatasets []string
-	RunSQLResult    any
-	RunSQLError     error
+	CalledSQL          string
+	Client             *bigqueryapi.Client
+	Service            *bigqueryrestapi.Service
+	AllowedDatasets    []string
+	AllowedTables      []string
+	RunSQLResult       any
+	RunSQLError        error
+	Project            string
+	Location           string
+	QuotaProject       string
+	MaxQueryResultRows int
+}
+
+func (m *MockSource) BigQueryProject() string {
+	return m.Project
+}
+
+func (m *MockSource) BigQueryLocation() string {
+	return m.Location
+}
+
+func (m *MockSource) BigQueryQuotaProject() string {
+	return m.QuotaProject
+}
+
+func (m *MockSource) GetMaxQueryResultRows() int {
+	return m.MaxQueryResultRows
 }
 
 func (m *MockSource) BigQueryClient() *bigqueryapi.Client {
@@ -71,6 +93,54 @@ func (m *MockSource) IsDatasetAllowed(projectID, datasetID string) bool {
 
 func (m *MockSource) BigQueryAllowedDatasets() []string {
 	return m.AllowedDatasets
+}
+
+func (m *MockSource) BigQueryAllowedTables() []string {
+	return m.AllowedTables
+}
+
+// IsTableAllowed reports whether a specific table may be accessed. Mirrors the
+// logic in bigquery.Source.IsTableAllowed for use in tool unit tests.
+func (m *MockSource) IsTableAllowed(projectID, datasetID, tableID string) bool {
+	if len(m.AllowedDatasets) == 0 && len(m.AllowedTables) == 0 {
+		return true
+	}
+	// IsDatasetAllowed returns true when AllowedDatasets is empty (meaning "no
+	// restriction" for that check alone), which would incorrectly allow every
+	// dataset for a tables-only configuration. Only delegate to it when
+	// AllowedDatasets actually has entries.
+	if len(m.AllowedDatasets) > 0 && m.IsDatasetAllowed(projectID, datasetID) {
+		return true
+	}
+	if strings.Contains(tableID, "*") {
+		return false
+	}
+	target := fmt.Sprintf("%s.%s.%s", projectID, datasetID, tableID)
+	for _, allowed := range m.AllowedTables {
+		if allowed == target {
+			return true
+		}
+	}
+	return false
+}
+
+// IsDatasetVisible reports whether a dataset may be introspected at all: either
+// it is allowed outright, or it holds at least one allowed table. Mirrors
+// bigquery.Source.IsDatasetVisible for use in tool unit tests.
+func (m *MockSource) IsDatasetVisible(projectID, datasetID string) bool {
+	if len(m.AllowedDatasets) == 0 && len(m.AllowedTables) == 0 {
+		return true
+	}
+	if len(m.AllowedDatasets) > 0 && m.IsDatasetAllowed(projectID, datasetID) {
+		return true
+	}
+	prefix := fmt.Sprintf("%s.%s.", projectID, datasetID)
+	for _, allowed := range m.AllowedTables {
+		if strings.HasPrefix(allowed, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *MockSource) BigQuerySession() bigqueryds.BigQuerySessionProvider {
