@@ -227,6 +227,10 @@ func toolsListHandler(ctx context.Context, id jsonrpc.RequestId, primitiveMgr *p
 		return validateErr, err
 	}
 
+	if err := mcputil.CheckGroupClientAuth(primitiveMgr, g, header); err != nil {
+		return jsonrpc.NewError(id, jsonrpc.INVALID_REQUEST, err.Error(), nil), err
+	}
+
 	urlParams, _ := util.UrlParamsFromContext(ctx)
 	listToolsResult, err := GenerateListToolsResult(primitiveMgr, g, urlParams)
 	if err != nil {

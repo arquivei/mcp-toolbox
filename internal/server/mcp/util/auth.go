@@ -20,7 +20,13 @@ import (
 	"slices"
 	"strings"
 
+	"fmt"
+
 	"github.com/googleapis/mcp-toolbox/internal/auth"
+	"github.com/googleapis/mcp-toolbox/internal/group"
+	"github.com/googleapis/mcp-toolbox/internal/server/primitives"
+	"github.com/googleapis/mcp-toolbox/internal/sources"
+	"github.com/googleapis/mcp-toolbox/internal/tools"
 	"github.com/googleapis/mcp-toolbox/internal/util"
 )
 
@@ -62,3 +68,49 @@ func ValidateScopes(ctx context.Context, toolScopes []string, authServices map[s
 
 	return nil
 }
+
+// CheckGroupClientAuth checks if any tool in group g requires client authorization,
+// and if so, verifies that a valid token header is provided.
+func CheckGroupClientAuth(primitiveMgr *primitives.PrimitiveManager, g group.Group, header http.Header) error {
+	if primitiveMgr == nil {
+		return nil
+	}
+	for _, toolName := range g.ToolNames {
+		tool, ok := primitiveMgr.GetTool(toolName)
+		if !ok {
+			continue
+		}
+		srcName := tool.GetSourceName()
+		var src sources.Source
+		if srcName != "" {
+			src, ok = primitiveMgr.GetSource(srcName)
+			if !ok {
+				continue
+			}
+		}
+		clientAuth, err := tool.RequiresClientAuthorization(src)
+		if err != nil {
+			return fmt.Errorf("error during client authorization check: %w", err)
+		}
+		if clientAuth {
+			authTokenHeadername, err := tool.GetAuthTokenHeaderName(src)
+			if err != nil || authTokenHeadername == "" {
+				authTokenHeadername = "Authorization"
+			}
+			var accessToken tools.AccessToken
+			if header != nil {
+				accessToken = tools.AccessToken(header.Get(authTokenHeadername))
+			}
+			if accessToken == "" {
+				return util.NewClientServerError(
+					"missing access token in the 'Authorization' header",
+					http.StatusUnauthorized,
+					nil,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+

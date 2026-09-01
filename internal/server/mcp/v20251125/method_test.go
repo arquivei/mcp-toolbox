@@ -17,6 +17,7 @@ package v20251125
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -184,6 +185,7 @@ func TestToolsListHandler(t *testing.T) {
 		name        string
 		body        ListToolsRequest
 		rawBody     []byte
+		header      http.Header
 		g           group.Group
 		wantErr     bool
 		errContains string
@@ -191,6 +193,7 @@ func TestToolsListHandler(t *testing.T) {
 		{
 			name:        "invalid json body",
 			rawBody:     []byte(`{invalid json}`),
+			header:      nil,
 			g:           mustGroup(t, primitiveMgr),
 			wantErr:     true,
 			errContains: "invalid mcp tools list request",
@@ -204,6 +207,7 @@ func TestToolsListHandler(t *testing.T) {
 					},
 				},
 			},
+			header:  nil,
 			g:       mustGroup(t, primitiveMgr),
 			wantErr: false,
 		},
@@ -216,6 +220,7 @@ func TestToolsListHandler(t *testing.T) {
 					},
 				},
 			},
+			header:  http.Header{"Mcp-Method": []string{"tools/list"}},
 			g:       mustGroup(t, primitiveMgr),
 			wantErr: false,
 		},
@@ -231,7 +236,7 @@ func TestToolsListHandler(t *testing.T) {
 					t.Fatalf("unexpected error during marshaling")
 				}
 			}
-			got, err := toolsListHandler(context.Background(), dummyID, primitiveMgr, tt.g, body)
+			got, err := toolsListHandler(context.Background(), dummyID, primitiveMgr, tt.g, body, tt.header)
 
 			if tt.wantErr {
 				if err == nil {
