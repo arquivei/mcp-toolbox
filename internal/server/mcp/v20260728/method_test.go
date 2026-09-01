@@ -419,12 +419,17 @@ func TestToolsListHandler(t *testing.T) {
 	toolsMap, promptsMap, groups := testutils.SetUpResources(t, mockTools, nil)
 	primitiveMgr := primitives.NewPrimitiveManager(nil, nil, nil, toolsMap, promptsMap, groups)
 
+	mockToolsWithAuth := []testutils.MockTool{testutils.MockTool1, testutils.MockTool5}
+	toolsMapAuth, promptsMapAuth, groupsAuth := testutils.SetUpResources(t, mockToolsWithAuth, nil)
+	primitiveMgrAuth := primitives.NewPrimitiveManager(nil, nil, nil, toolsMapAuth, promptsMapAuth, groupsAuth)
+
 	tests := []struct {
 		name        string
 		body        ListToolsRequest
 		rawBody     []byte
 		header      http.Header
 		g           group.Group
+		mgr         *primitives.PrimitiveManager
 		wantErr     bool
 		errContains string
 	}{
@@ -433,6 +438,7 @@ func TestToolsListHandler(t *testing.T) {
 			rawBody:     []byte(`{invalid json}`),
 			header:      nil,
 			g:           mustGroup(t, primitiveMgr),
+			mgr:         primitiveMgr,
 			wantErr:     true,
 			errContains: "invalid mcp tools list request",
 		},
@@ -459,6 +465,7 @@ func TestToolsListHandler(t *testing.T) {
 			},
 			header:      http.Header{"Mcp-Method": []string{"WRONG_METHOD"}},
 			g:           mustGroup(t, primitiveMgr),
+			mgr:         primitiveMgr,
 			wantErr:     true,
 			errContains: "does not match body value",
 		},
@@ -485,6 +492,7 @@ func TestToolsListHandler(t *testing.T) {
 			},
 			header:  nil,
 			g:       mustGroup(t, primitiveMgr),
+			mgr:     primitiveMgr,
 			wantErr: false,
 		},
 		{
@@ -510,6 +518,60 @@ func TestToolsListHandler(t *testing.T) {
 			},
 			header:  http.Header{"Mcp-Method": []string{TOOLS_LIST}},
 			g:       mustGroup(t, primitiveMgr),
+			mgr:     primitiveMgr,
+			wantErr: false,
+		},
+		{
+			name: "missing client auth token",
+			body: ListToolsRequest{
+				PaginatedRequest: PaginatedRequest{
+					Request: jsonrpc.Request{
+						Method: "tools/list",
+					},
+					Params: PaginatedRequestParams{
+						RequestParams: RequestParams{
+							Meta: &RequestMetaObject{
+								ProtocolVersion: PROTOCOL_VERSION,
+								ClientInfo: Implementation{
+									BaseMetadata: BaseMetadata{Name: "TestClient"},
+									Version:      "1.0",
+								},
+								MetaClientCapabilities: &ClientCapabilities{},
+							},
+						},
+					},
+				},
+			},
+			header:      http.Header{"Mcp-Method": []string{TOOLS_LIST}},
+			g:           mustGroup(t, primitiveMgrAuth),
+			mgr:         primitiveMgrAuth,
+			wantErr:     true,
+			errContains: "missing access token in the 'Authorization' header",
+		},
+		{
+			name: "valid client auth token",
+			body: ListToolsRequest{
+				PaginatedRequest: PaginatedRequest{
+					Request: jsonrpc.Request{
+						Method: "tools/list",
+					},
+					Params: PaginatedRequestParams{
+						RequestParams: RequestParams{
+							Meta: &RequestMetaObject{
+								ProtocolVersion: PROTOCOL_VERSION,
+								ClientInfo: Implementation{
+									BaseMetadata: BaseMetadata{Name: "TestClient"},
+									Version:      "1.0",
+								},
+								MetaClientCapabilities: &ClientCapabilities{},
+							},
+						},
+					},
+				},
+			},
+			header:  http.Header{"Mcp-Method": []string{TOOLS_LIST}, "Authorization": []string{"Bearer valid_token"}},
+			g:       mustGroup(t, primitiveMgrAuth),
+			mgr:     primitiveMgrAuth,
 			wantErr: false,
 		},
 	}
@@ -524,7 +586,11 @@ func TestToolsListHandler(t *testing.T) {
 					t.Fatalf("unexpected error during marshaling")
 				}
 			}
-			got, err := toolsListHandler(ctx, dummyID, primitiveMgr, tt.g, body, tt.header)
+			mgr := tt.mgr
+			if mgr == nil {
+				mgr = primitiveMgr
+			}
+			got, err := toolsListHandler(ctx, dummyID, mgr, tt.g, body, tt.header)
 
 			if tt.wantErr {
 				if err == nil {

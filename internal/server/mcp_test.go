@@ -126,11 +126,12 @@ func TestMcpEndpointWithoutInitialized(t *testing.T) {
 	defer ts.Close()
 
 	testCases := []struct {
-		name  string
-		url   string
-		isErr bool
-		body  jsonrpc.JSONRPCRequest
-		want  map[string]any
+		name   string
+		url    string
+		isErr  bool
+		body   jsonrpc.JSONRPCRequest
+		header map[string]string
+		want   map[string]any
 	}{
 		{
 			name: "ping",
@@ -150,8 +151,9 @@ func TestMcpEndpointWithoutInitialized(t *testing.T) {
 			},
 		},
 		{
-			name: "tools/list",
-			url:  "/",
+			name:   "tools/list",
+			url:    "/",
+			header: map[string]string{"Authorization": "Bearer fake-token"},
 			body: jsonrpc.JSONRPCRequest{
 				Jsonrpc: jsonrpcVersion,
 				Id:      "tools-list",
@@ -381,7 +383,7 @@ func TestMcpEndpointWithoutInitialized(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error during marshaling of body")
 			}
-			resp, body, err := runRequest(ts, http.MethodPost, tc.url, bytes.NewBuffer(reqMarshal), nil)
+			resp, body, err := runRequest(ts, http.MethodPost, tc.url, bytes.NewBuffer(reqMarshal), tc.header)
 			if err != nil {
 				t.Fatalf("unexpected error during request: %s", err)
 			}
