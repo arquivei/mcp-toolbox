@@ -1568,7 +1568,6 @@ func TestPrebuiltTools(t *testing.T) {
 	mysql_config, _ := prebuiltconfigs.Get("mysql")
 	neo4jconfig, _ := prebuiltconfigs.Get("neo4j")
 	oceanbase_config, _ := prebuiltconfigs.Get("oceanbase")
-	oracle_config, _ := prebuiltconfigs.Get("oracledb")
 	postgresconfig, _ := prebuiltconfigs.Get("postgres")
 	serverless_spark_config, _ := prebuiltconfigs.Get("serverless-spark")
 	cloudstorage_config, _ := prebuiltconfigs.Get("cloud-storage")
@@ -2248,17 +2247,6 @@ func TestPrebuiltTools(t *testing.T) {
 				"snowflake_tools": group.GroupConfig{
 					Name:      "snowflake_tools",
 					ToolNames: []string{"execute_sql", "list_tables"},
-				},
-			},
-		},
-		{
-			name: "Oracle prebuilt tools",
-			in:   oracle_config,
-			wantGroups: server.GroupConfigs{
-				"oracle_database_tools": group.GroupConfig{
-					Name:        "oracle_database_tools",
-					Description: "Use these skills to manage and monitor Oracle databases by executing SQL statements, exploring schema metadata, analyzing query performance, monitoring active sessions and resource consumption, and managing storage and object health.",
-					ToolNames:   []string{"execute_sql", "list_tables", "list_active_sessions", "get_query_plan", "list_top_sql_by_resource", "list_tablespace_usage", "list_invalid_objects"},
 				},
 			},
 		},

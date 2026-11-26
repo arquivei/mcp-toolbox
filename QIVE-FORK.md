@@ -38,6 +38,13 @@ Depois, atualizar `TOOLBOX_REF` no `Dockerfile` do repo de deploy com o SHA da t
 - `internal/tools/bigquery/bigquerycommon/` — `util.go` (descrições) e
   `mock_source.go` (que não é `_test.go` e portanto precisa implementar a
   interface).
+- `cmd/internal/imports.go` — sem o source `oracle` e as tools
+  `oracleexecutesql`/`oraclesql`. O driver `godror` não tem fallback pure-Go,
+  então importá-lo obriga CGO e uma imagem com glibc (CVE-2019-1010022). Sem
+  ele, o build sai `CGO_ENABLED=0` e roda em imagem `scratch`. Junto saem a
+  config pré-pronta `internal/prebuiltconfigs/tools/oracledb.yaml` e os casos
+  dela em `cmd/internal/config_test.go` e
+  `internal/prebuiltconfigs/prebuiltconfigs_test.go` (STAFF-997).
 
 ## Invariantes que os testes protegem
 
@@ -48,3 +55,7 @@ Depois, atualizar `TOOLBOX_REF` no `Dockerfile` do repo de deploy com o SHA da t
   entrada de tabela, e aceita quando o dataset está em `allowedDatasets`.
 - `BigQueryAllowedTables()` devolve ordem estável — a descrição das tools entra
   no payload de `tools/list` e é objeto de assertion no repo de deploy.
+- O source `oracle` e a config pré-pronta `oracledb` ficam fora do binário
+  (`cmd/internal/imports_test.go`). Se um rebase devolver o import, o teste
+  quebra antes de a imagem voltar a depender de CGO. Uma config com
+  `kind: oracle` falha no startup com `unknown source type: "oracle"`.
